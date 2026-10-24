@@ -1,0 +1,92 @@
+Ты - senior ML engineer / recsys. Твоя задача - закрыть этап "раализация моделей + веб-интерфейс" в проекте рекомендательной системы sweet.tv. Формат вывода: сам промпт - только текст, без таблиц и графиков. В артефактах таблицы допустимы; числа можно перечислять строками или таблицей. Веб-интерфейс минимальный, отображение списком без сложных визуализаций
+
+Уже сделано и не переделывается: EDA и data quality в outputs/eda/eda.ipynb. В разделе D определены pair, items, aggregate rule, hygiene. В outputs/evaluation/evaluation.ipynb лежит evaluation harness с тремя baceline и MAP@5. В src/data.py определены merge_overlapping_views, build_overlap_pairs, build_airing_table, build_aggregated_items, items_for_weeks, items_for_weeks_with_ratio. В data_par/raw исходные parquet. В data_par/derived кэш views_merged.parquet и pair_11_30.parquet
+
+Три baseline уже отправлены на Kaggle. Фактические score - recent_pop: public 0.29553, private 0.29554, global_pop: public 0.22583, private 0.23147, personal: public 0.21959, private 0.21044. Порядок методов одинаков на public и private. Различия между методами находятся в пределах шума
+
+Ключевые наблюдения из публичных результатов:
+ - свежесть популярности важнее длинной истории;
+ - recent_top5 за последние 4 недели обгоняет global_top5 за 20 недель на 28-31 процент при одинаковом пуле кандидатов. Простой топ-5 без персонализации уже дает планку 0.2955, и любая модель должна ее обогнать, иначе персонализация не оправдана. Personal baseline (топ по total_watched_s без нормализации по времени) не лучше global; это не доказывает бесполезность истории вообще, только конкретно этого personal. Локальный порядок совпадает с Kaggle, но уровень расходится в несколько раз. Вероятно, цель Kaggle мягче T08, окно 12 против 10 недель, либо другая группа пользователей. Относительная позиция personal к global на Kaggle мягче, чем на To8 (0.97 public и 0.91 privatr против 0.81 локально) - намек, что цель Kaggle более дружелюьная к повторам
+
+ОГРАНИЧЕНИЯ И ЗАПРЕТЫ
+Не переделывать EDA и evaluation harness. Не менять три baseline, recent_pop 0.2955 сохраняется как эталонная планка для сравнения. Не использовать тестовые недели 31-42 ни для чего, кроме справочника программ и candidate_set. Лимит сабмитов на этот этап - до трех. Никакой кириллицы в коде, комментариях, md-файлах, веб-интерфейсе. Не разрабатывать веб-интерфейс до окончания фазы 5
+
+ЦЕЛЕВАЯ СТРУКТУРА ПОСЛЕ ЗАВЕРШЕНИЯ
+В src/ добавляются eval.py, pipeline.py, и папка models/ с файлами __init__.py, als.py, graph.py, popularity.py, hybrid.py
+В scripts/ добавляются calibrate.py, train_als.py, train_graph.py, train_popularity.py, make_submission.py, update_calibration.py
+В outouts/solution добавляются models_card.mdm calibration.md, submissions/ (с CSV и .meta.json рядом с каждым), als_best.pkl, graph_best.pkl.gz, popularity_best.json, hybrid_best.json
+В outputs/evaluation добавляется eval_top5.json
+В корне проекта появляется папка web с файлами app.py, requirements.txt, README.md
+Больше ничего не создавать и не удалять
+
+ФАЗА 0. КАЛИБРОВКА ЦЕЛИ
+Задача: првоерить, воспроизводит ли T_top5 и порядок, и уровень public score recent_pop. Если да, использовать T_top5 как основную локальную цель для тюнинга моделей. Если нет, оставить T05 или T08 и тюнинг вести на них с оговоркой про расхождение
+
+В src/eval.py перенести map_at_k и ap_at_k из evaluation.ipynb без изменения логикию. Добавить build_ground_truth с параметром mode и buid_unified_fallback, fill_with_fallback. T03 = ratio >= 0.3 и т.д., T_top5 = top-5 tv_show_id по total_watched_s для каждого user за указанные недели, отфильтрованные candidate_set, без порога ratio (это гипотеза о более мягкой цели Kaggle)
+
+В scripts/calibrate.py: загрузить wiews_merged, pair, schedule, candidate_set для валидации. Для каждой цели из набора T03,T05, T08 и T_top5 построить gt и посчитать MAP@5 для трех baseline. Сохранить резулультаты в outputs/evaluation/eval_top5.json в формате списка объектов, каждый с полями mode, method, map_at_5, n_users_eval
+
+В ouputs/solution/calibration.md запиать локальные MAP для всех 4 целей и трех baseline, а также публичные и приватные score трех baseline. Зафиксировать решение по T_top5 в виде абзаца: если относительное расхождение локального recent_pop на T_top5 и public score recent_pop не больше 30% И порядок baseline на T_top5 совпадает с публичным (recent > global > personal), T_top5 принимается как основная локальная цель, и это отступление от ранее зафиксированного правила T08 фиксируется явно с обоснованием. Иначе основная локальная цель - T05, а расхождение документируется
+
+ФАЗА 1. GRID ПО ОКНУ И DECAY ДЛЯ POPULARITY
+Задача: recent_pop - это top-5 за последние 4 недели с равными весами. Обобщение - взвешенная популярность с затуханием. Проверить, какое окно и decay дают лучший локальный MAP
+
+В src/models/popularity.py реализовать weighted_popularity с параметрами window_week и half_life_days. reference_time - последний timestamp истории, не target. Вес = 0.5 в степени (age_days / half_life_days), score(tv_show_id) = сумма веса по пользователям, где каждый пользователь учитывается 1 раз. Полу-бесконечный half_life имитирует равные веса внутри окна. Возвращать top-k с фильтром по candidate_set
+
+В scripts/train_popularity.py перебирать grid: window_weeks из набораа 4,6,8,12,20, half_life_days из набора 7,14,21,28,56, infinity. Для каждой конфигурации обучить на hist за недели (target_start - window_weeks до target_start - 1), получить top-5 на eval_user через fill_with_fallback, посчитать MAP@5 на выбранной цели. Сохранить в ouputs/solution/popularity_grid.json (список с полями window_weekd, half_life_days, map_at_5). Отобрать top-1 и записать в ouputs/solution/popularity_best.json вместе с полями. Если MAP top-1 не больше MAP recent_pop, оставить recent_pop как reference и не заменять
+
+ФАЗА 2. ALS / IMPLICIT MF
+Задача: первая модель. Матрица user X show, implicit фидбэк, decay по времени. Установить implicit, при невозможности использовать sklearn TruncatedSVD на бинарной матрице и зафиксировать выбор в models_card.md
+
+В src/models/als.py реализовать build_user_show_matrix с параметрами hist_items, reference_time, half_life_days. Вес = log1p(total_watched_s) * 0.5 в степени (age_days / half_life_days). Возвращать scipy.sparse.csr_matrix и индексы users и items. Реализовать train_als с параметриами factors, regularization, iterations, alpha, seed=42. Реализовать recommend_als с параметрами model, user_idx, items_index, candidate_set, k=5, n_candidates=200
+
+В scripts/train_als.py перебрать grid: windows_weeks из 6, 8,12,half_life_days и 14,28,56. factors из 32,64, reularization из 0.01, 0.1, alpha из 10, 40. Суммарно 72 комбинации. Если обучение одной комбинации дольше 30 секунд, уменьшить grid и обосновать в models_card.md. Суммарное время не должно превышать 1 час. Сохранить outputs/solution/als_grid.json (список с полями window_weeks, half_life_days, factors, regularization, alpha, map_at_5). Отобрать top-1, сохранить модель в outputs/solution/als_best.pkl. Sanuty check: маленькая матрица 3Х3 с фиксированным seed дает воспроизводимый результат; для 3 тестовых пользователей рекомендации не пустые; при истории из одного show либо этот show, либо соседи
+
+ФАЗА 3. ITEM-ITEM Graph С TIME-DECAY
+Задача: вторая модель. НЕ CBF не метаданных, а item-item co-occurence с time-decay. Работает лучше на TV-домене, кодирует "что смотрят вместе в окне"
+
+В src/models/graph.py реализовать build_item_graph с параметрами hist_items, half_life_days, min_user_weeks. Для каждого user-week собрать множество show, которые пользователь смотрел. Для каждой пары внутри user-week накопить count_user_weeks (число уникальных user-week) и decay_weight (сумма 0.5 в степени (age_weeks / (half_life_days / 7) ). Возвращать DataFrame с полями item_a, item_b, count_user_weeks, decay_weight, фильтрованный по count_user_weeks больше либо равно min_user_weeks и упорядоченный по decay_weight
+
+Реализовать recommend_graph с параметрами item_graph, user_history_show_ids, candidate_set, k=5, n_seeds=20. Seeds - top-n_seeds show из истории пользователя по total_watched_s с decay. От seeds пройти один шаг по графу, score(item) = сумма decay_weight по всем seed. Отфильтровать candidate_set, исключить уже смотренные seeds (повторы по умолчанию запрещены), вернуть top-k
+
+В scripts/train_graph.py перебрать grid: window_wees из 4,6,8,half_life_days из 14,28,56? min_user_weeks из 1,2. Суммарно 18 комбинаций. Сохранить ouputs/solution/graph_grid.json с полями. Отобрать top-1, сохранить граф в outputs/solution/graph_best.pkl.gz. Sanity check: граф не пустой (число ребер и средняя степень в stdout); для user с одним show рекомендации через граф возвращают соседей; для холодного user - fallback
+
+ФАЗА 4. ГИБРИД
+Задача: personal сам по себе слабее popularity. Гибрид popularity плюс модель может дыть прирост. Проверить формально
+
+В src/models/hybrid.py реализовать hybrid_score с параметрами popularity_scores, model_scores, alpha. score(item) = alpha * popularity_norm(item) плюс (1 - alpha) * model_norm(item), где обе компоненты проходят min-max нормализацию внутри candidate_set. Alpha из набора 0.0, 0.3, 0.5, 0.7, 0.9, 1.0, где 0.0 - только модель, 1.0 - только popularity. Возвращать top-k
+
+В scripts/ проверить три гибрида: popularity_best + als_best, popularity_best + graph_best и взвешенная сумма трех (популярность, ALS, граф) с весами из набора (0.5, 0.3, 0.2), (0.6, 0.2, 0.2), (0.4, 0.4, 0.2). Не больше пяти комбинаций. Для каждого гибрида посчитать MAP@5 на выбранной цели, сохранить outputs/solution/hybrid_grid.json с полями. Если лучший гибрид строго лучше popularity_best, сохранить в outputs/solution/hybrid_best.json с описанием конфигурации
+
+ФАЗА 5. Отбор, Сабмиты, Калибровка
+Лимит: до 3 сабмитов на этот этап
+Отправку сделаю самостоятельно
+
+В scripts/make_submission.py: обучение на ВСЕЙ истории недель 11-30 с параметрами из top-1 каждой модели. Для 1260 test users сформировать топ-5 от каждой модели. Fallback - popularity_best за 11-30 с decay. Сохранить CSV в outputs/solution/submissions с префиксом NN и именем модели. Формат: user_id и пять tv_show_id через пробел. Рядом с каждым CSV сохранить .meta.json с полями гипотеза, основной пик, локальный MAP на выбранной цели.
+
+В scripts/update_calibration.py: принять на вход имя CSV, фактический public и private score. Дописывать в outputs/solution/calibration.md текстовые строки: для каждого сабмита отдельным абзацем указывать имя файла, гипотезу, локальный MAP, public, private, разницу с recent_pop
+
+ОГРАНИЧЕНИЯ ПО РЕСУРСАМ
+4 GB RAM, 4 логических CPU. Все train скрипты суммарно не дольше 1 часа. Не читать тестовое расписание 31-42 кроме как для candidate_set. Не конкатенировать полные items за все недели разом
+
+ACCEPTANCE CRITERIA
+ - src/eval.py содержит ap_at_k, map_at_k, build_ground_truth  с параметром mode, build_unified_fallback. Юнит-тест map_at_k проходит
+ -  outputs/solution/calibration.md содержит строки локальных MAP для четырех целей и трех baseline и строки public и private score трех baseline. Явный абзац с решением по T_top5 с обоснованием. 
+ - outputs/solution/popularity_grid.json, als_grid.json, graph_grid.json, hybrid_grid.json созданы и содержат не меньше 3 записей каждый
+ - modeks_card.md содержит для каждой модели окно, decay, гиперпараметры, MAP_local на выбранной цели, MAP_public если был сабмит и абзац обосноания выбора
+ - outputs/solution/als_best.pkl и graph_best.pkl.gz существуют
+ - Либо хотя бы 1 одель строго обогнала recent_pop на public с margin больше 0.005, либо в калибровочном логе явно записано, что ни одна модель не обогнала и персонализация на этих данных не дает прироста сверх свежей популярности
+ - Ни одной ошибки AttributeError, KeyError, ImportError после переноса map_at_k в src/eval.py; сравнить с выводом evaluation.ipynb до правки
+ - Во всех новых файлах нет кириллицы (кроме тестовых данных .parquet)
+ - тестовые недели 31-42 нигде не читаются, кроме построения candidate_set
+ - суммарное время всех train скриптов меньше часа не текущей машине; после каждого скрипта в stdout выводится время выполнения
+
+ПОРЯДОК ВЫПОЛНЕНИЯ И САМОПРОВЕРКА
+- Фаза 0
+- Фаза 1
+- Фаза 2
+- Фаза 3
+- Фаза 4
+- Фаза 5
+- прогнать acceptance, где не прошло исправить и перезапустить соовтетствующий скрипт
+- вывести в stdout финальный отчет текстом - список созданных и измененных файлов, строки калибровки, MAP@5 каждой модели на выбранной цели, вывод о пункту 7 acceptance, суммарное время обучения и пик RAM

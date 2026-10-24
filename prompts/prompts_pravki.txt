@@ -1,0 +1,204 @@
+Ты - senior data analyst / ML engineer. Твоя задача - закрыть три блока замечаний к текущей версии EDA к проекту рекомендательной системы sweet.tv:
+- data quality: склейка пересекающихся просмотров
+- честная валидация: пул кандидатов из целевого окна, единый fallback, MAP@5, три baseline
+- чувствительность MAP к порогу цели и чек-лист целостности данных
+
+плюс обновить текстовые выводы в ноутбуке EDA, где числа и формулировки расходятся с фактическими данными (если еще не исправлено)
+
+НЕ ВЫПОЛНЯТЬ:
+- Обучение моделей MF / ALS / CBF / граф / гибрид
+- Разработку веб-интерфейса
+- генерацию submission.csv
+- любые действия с тестовыми неделями 31-42, кроме справочника программ
+
+
+1. Текущее состояние и целевая структура:
+- В папке src появляется файл data.py (новый модуль)
+- В папке outputs/eda новых файлов не создается, меняются текущие
+- В папке outputs создается папка evaluation с 3 файлами:
+  - evaluation.ipynb (новый ноутбук)
+  - eval_metrics.json (выход evaluation.ipynb)
+  - sensitivity.json (выход evaluation.ipynb)
+
+Больше файлов создавать не нужно. В outputs/eda/ ничего кроме eda.ipynb и figures/  не добавлять
+
+2. src/data.py - требования к новому модулю
+Назначение: чистый модуль с переимпользуемыми функциями, который импортируют eda.ipynb, evaluation.ipynb и будущий silution.ipynb
+
+Требования:
+  - Чистые функции без print в теле, только return
+  - Docstring обязателен для каждой функции
+  - Зависимости: только pandas, numpy. Никаких sklearn / pyspark
+  - Никакой кирилицы в коде и комментариях
+
+Переносятся БЕЗ ИЗМЕНЕНИЙ ЛОГИКИ 5 функций, котоыре сейчас определены внутри eda.ipynb:
+  - build_overlap_pairs
+  - build_airing_table
+  - build_aggregated_items
+  - items_for_weeks
+Плюс 2 новые:
+  - items_for_week_with_ratio(pair_frame, views_frame, week_vaues, ratio_threshold)
+  - merge_overlapping_views(views_df)
+Везде где есть ratio_threshold=0.8 нужно вынести 0.8 в глобальную переменную, чтобы можно было поменять значения при необходимости
+
+Семантика merge_overlapping_views:
+Назначение: устранить двойно учет просмотров, когда пользователь смотрит один канал с нескольких устройств. Пример из данных: у одного пользователя по шоу 2400480 total_watched_s = 2 276 062 с при сумме длин эфиров 569 100 с (ровно x4). Без склейки watched_s завышен, qualified_airings считает один и тот же эфир несколько раз, aggregate_ratio маскируется через min(watched_s, show_duration)
+
+Вход: DataFrame с колонками user_id (uint64), vsetv_id (int64), start_time (datetime64[ns]), stop_time (datetime64[ns]), duration (int64). Колонка iso_week может присутствовать - игнорировать
+Выход: DataFrame с user_id, vsetv_id, start_time, stop_time, duration в таких же типах. iso_week не гарантируется, пересчитывается снаружи
+
+Логика: для каждой пары (user_id, vsetv_id) объединить пересекающиеся интервалы [start, stop] в один: min(start), map(stop).
+Пересечение - когда start_next <= stop_prev и интервалы действительно перекрываются (полные дубли, вложенные, частичные).
+Касание концами (start_next == stop_prev) НЕ пересечение, два отдельных интервала
+
+Производительности: векторизовано, без groupby.apply с циклом по пользователям. Ориентир = 5.8М строк views на 2 CPU < 30 сек, <2 GB RAM (потолок окружения - 4 GB)
+
+Обязательные юнит-тесты (внутри модуля, pytest-стиль, с skip-маркером если pytest не установлен):
+  - четыре копии одного и того же интервала - одна строка
+  - 2 частично перекрывающихся интервала - одна строка
+  - 2 интервала, касающихся концами - 2 строки
+  - три непересекающихся интервала - три строки
+
+3. eda.ipynb - правки
+Общий принцип: структура A-H и Notes сохраняется, но:
+  - в разделе D добавляются 2 новые подсекции
+  - тела хелперов переезжают в src/data.py
+  - downstream-вызовы переключаются с views на views_merged
+  - несколько конкретных фраз в Conclusion-ячейках заменяются на конкретные
+
+3.1. Импорт хелперов:
+В начале ноутбука (сразу после блока импортов) добавить импорт 5 функций из src.data. В разделе D удалить тела этих функций, оставить одну строку-принт про успешный импорт
+
+3.2. Новая подсекция B1 Data quality: overlapping views
+Место: в разделе D ПЕРЕД ячейкой, где строится pair из views и train_schedule_core
+
+Состав:
+  - markdown-ячейка с объяснением проблемы (пример с 2 276 062 / 569 100, формулировка про двойной учет при просмотре с нескольких устройств)
+  - code-ячейка: views_merged = merge_overlapping_views(views), пересчет iso_week, вывод stdout количества строк до/после и процента сокращения, показать head(5)
+  - code-ячейка sanity-check: после сборки pair и build_airing_table(0.8) сгруппировать watched_s и show_duration по (user_id, tv_show_id), убедиться что для tv_show_id=2400480 нет ни одной пары с watched_s > 2 000 000. При нарушении asset с понятным сообщением, при успехе print OK
+
+3.3. Новая подсекция Data hygiene
+Место: в разделе D после блока aggregated rule и items_per_user, перед разделом E
+
+Состав:
+  - markdown-ячейка Data hygiene с однострочным описанием, что проверяем
+  - code-ячейка с таблицей из трех групп проверок:
+    - число vsetv_id в views_merged, которых нет в train_schedule_core.channel_id
+    - число расхождений duration vs (stop_time - start_time) больше 1 секунды на выборке 10 000 строк
+    - доля непустых tv_show_category, tv_show_genre_1, year_of_production, director, actors среди строк с tv_show_id != 0
+  - markdown-ячейка с выводом: если directors/actors среди размеченных строк почти пустые - CBF опирается только на category и genre_1
+
+3.4. Текстовые правки:
+Проверь, что все данные в тексте совпадают с полученными данными из кода. Если числа не совпадают, то поправь в conclusion. 
+
+3.5. Переключение views - views_merged
+Везде ниже раздела B1 заменить имя переменной views на views_merged в вызовах:
+  - построение pair
+  - build_string_table
+  - aggregated_summery
+  - items_per_user
+  - train_items, top-shows, coverage (раздел F)
+  - repeats и temporal stability (раздел G)
+  - validation split и baselines (раздел H)
+Логику ячеек НЕ менять - только имя переменной
+
+3.6. Раздел F дополнить
+Если в текущей верии еще нет пересечения train_schedule_2 vs test_schedule по tv_show_id, добавить code-ячейку:
+  - train_sched_2 и test_schedule уникальные tv_show_id != 0
+  - сколько id в обоих, сколько только в train, сколько только в test
+  - сколько test tv_show_id вообще никогда не встречается в тренировочном view log
+
+
+4. evaluation.ipynb - новый ноутбук
+Назначение: честная валидация. Никаких моделей - только 3 baseline и MAP@5 на схеме, которая будет повторена на тесте
+
+Схема валидации:
+- история = неделя 11-20
+- target = недели 21-30
+- пул кандидатов = уникальные tv_show_id != 0 из train_schedule_2 (export_arh_21-30-final.parquet). Обоснование: на тесте кандидатов будет ограничивать test_schedule (31-42), поэтому на валидации эмулируем это же правило - без ограничений baseline берут шоу, котрые в целевом окне не идут, и MAP искажается
+- fallback единый для всех методов: глобальный топ-5 по популярности за историю, отфильтрованный пулом кандидатов. Никакие рекомендации не могут быть пустыми
+- MAP@5: AP = sum_{i=1..5} (hits@i / i) / min(|gt|, 5). Пользователи с пустым gt исключаются из среднего и учитываются отдельным счетчиком n_users_eval
+
+Структура ноутбука (каждая ячейка - отдельный смысловой шаг):
+1. Markdown: # Evaluation - sweet.tv TV program recommender и подзаголовок Evaluation setup с описанием схемы выше
+2. Code: импорты библиотек и импорт из src/data (merge_overlapping_views, build_overlap_pairs, items_for_weeks_with_ratio)
+3. Code: загрузка данных
+  - views из dataset11-30week1.parquet, переименование duraton - duration, приведение типов, views_merged = merge_overlapping_views, пересчет iso_week
+  - train_sched_2 из export_arh_21-30-final.parquet с приведением типов (как в eda.ipynb)
+  - train_sched_core из export_arh_11-20-final.parquet с приведением типов
+  - schedule_11_30 = concat(train_sched_core, train_sched_2), дедуп по (channel_id, start_time)
+  - overlap = build_overlap_pairs(views_merged, schedule_11_30); собрать pair с колонками user_id, tv_show_id, overlap_s, view_idx, sched_idx, view_duration, show_duration
+4. Markdown: ## Candidate pool and ground truth с обосновыванием, что пул = train_sched_2
+5. Code: candidate_pool = уникальные tv_show_id != 0 из train_shed_2; распечатать размер. val_hist = items_for_weeks_with_ratio(..., week=11..20, ratio=0.8). val_tgt = items_for_weeks_with_ratio(..., weeks=21..30, ratio=0.8), отфильтровать по candidate_set.gt_by_user = dict user_id - set(tv_show_id). Распечатать n_users и средний размер gt
+6. Markdown: ## MAP@5 helper с формулой и правилом про пустой gt
+7. Code: ap_at_k и map_at_k. Никаких побочных эффектов в функциях
+8. Markdown ## Unified fallback с обоснованием, что он один и тот е для всех методов; иначе AP=0 у personal истории будет артефактом метода, а не данных
+9. Code: fill_with_fallback(recs, fallback, k). global_pop по val_hist, отфильтрованным пулом, global_top5. Печать global_top5.
+10. Markdown: ## Baselines - global_pop (топ-5 за 11-20), recent_pop (топ-5 за 17-20), personal (топ-5 по total_watched_s из истории пользователя с фильтром по пулу и добором через fallback). Все три возвращают ровно 5 id
+11. Code: расчет трех baseline, MAP@5 для каждого, вывод DataFrame с колонками method, MAP@5, n_users_eval. Сохранение eval_merics.json (orient="records", indent=2)
+12. Markdown: ## Sensitivity to target threshold с тезисом, что порог 0.8 оставляет примерно 130к пар из 1.37М для ALS/графа это сильное объединение; сравниваем personal baseline на 0.3 . 0.5 / 0.8; порог - гиперпараметр задачи, а не правило из условия
+13. Code: цикл по порогам: 
+  - hist_t, tgt_t через items_for_weeks_with_ratio
+  - tgt_t отфильтровать пулом
+  - fallback пересчитать на этой истории
+  - personal_recs на hist_t с этим fallback
+  - MAP@5 - строка с threshold, n_hist_items, n_tgt_items, mean_gt_size, personal_MAP@5, n_users_eval
+Вывод sens_df, сохранение sensitivity.json
+14. Markdown: ## Notes and caveats - только наблюдаемые факты (например: пул кандидатов на валидации, пользователи с пустым gt иселючаются из среднего, порог 0.8 - кандидат). Никаких выводов и рекомендаций
+
+Требование к ноутбуку:
+  - Все ячейка на английском, без кирилицы (исключение - значения в данных .parquet)
+  - Ноутбук идемпотентен: Run All пересоздает eval_metrics.json и sensitivity.json
+  - Никаких %matplotlib магии - графики в этом ноутбуке не строятся
+  - Укладывается в 5 минут и 4 GB RAM на текущей машине
+
+5. Язык и стиль
+- Весь текст в markdown, print, комментариях - на английском языке
+- В src/data.py - только английский, без кириллицы
+- В eda,ipynb и evaluation.ipynb - только английский, без кириллицы
+- В evaluation.ipynb графиков нет, сохранять только JSON
+- Если в данных слова на русском, то при отображении данных в таблицах в ipynb они остаются русскими, дополнительно кодировать не нужно
+
+6. Жесткие запреты
+- Не обучать модели (MF, ALS, CBF, граф, гибрид)
+- Не использовать тестовые недели 31-42 ни для каких вычисления, кроме справочника программ
+- Не создавать submission.csv
+- Не разрабатывать веб-интерфейс
+- Не менять определения перенесенных в crs/data.py функций относительно текущей реализации в eda.ipynb
+- Не добавлять новые PNG в outputs/eda/figures - только пересоздавать существующие, так как views_merged изменит распределения
+- В outputs/eda/ не добавлять никаких новых файлов, кроме пересозданных figure и исправленного eda.ipynb
+- Не падать при отсутствии фрагмента текста для замены или отсутствии файла - выводить предупреждение и продолжать
+- Работать в пределах 4 GB RAM: не конкатенировать полные items за все недели разом
+
+7. Acceptance criteria
+После завершения вывести в stdout чек-лист:
+- merge_overlapping_views на viewsдает сокращение 30-60%
+- контрольная пара после склейки не воспроизводится
+- eda.ipynb прогоняется целиком без ошибок, все ячейки после правки дают непустые outputs
+- eval_metrics,json содержит ровно три записи (global_pop, recent_pop, personal), порядок MAP@5 записан как есть, не форсируется
+- sensitivity.json содержит ровно 3 записи (0.3, 0.5, 0.8) с полями threshold, n_hist_items, n_tgt_items, mean_gt_size, personal_MAP@5, n_users_eval)
+- Hygiene-таблица в eda.ipynb выводит все три группы проверок и не падает на пустых значениях
+- В eda.ipynb и evaluation.ipynb нет ни одной кириллической буквы в коде или markdown
+- Все текстовые правки из п.3.4 либо применены, либо отмечены в stdout как not found <текст>
+- Ни одного AttributeError / KeyError / ImportError после переезда функций в src/data.py
+- Финальная секция Notes and caveats в обоих ноутбуках содержит только факты, без выводов и рекомендаций
+
+8. Порядок выполнения и самопроверка:
+1. Создать src/data.py: перенести пять функций + добавить 2 новые и юнит-тесты. Запустить юнит-тесты, вывести результат в stdout (passed / skipped)
+2. Отредактировать eda.ipynb
+3. Выполнить:
+   jupyter --to notebook --execute --inplace \ --ExecutePreprocessor.timeout=1800 outputs/eda/eda.ipynb. Убедиться, что нет ошибок и все кодовые ячейки имеют outputs
+4. Создать outputs/evaluation/ и evaluation.ipynb (g.4)
+5. Выполнить:
+  jupyter nbconvert --to notebook --execute --inplace \ --ExecutePreprocessor.timeout=1800 outputs/evaluation/evaluation.ipynb
+6. Проверить acceptance criteria 1-10. Если что-то не выполнено - исправить и перезапустить функцию nbconvert --execute --inplace для соответствующего ноутбука
+7. Сохрани текущий промпт в папку prompts с названием prompts_pravki.txt
+8. В stdout вывести финальный отчет:
+  - список созданных/измененных файлов
+  - результат каждого acceptace-check (passed / failed + причина)
+  - три MAP@5 из eval_metrics.json 
+  - три MAP@5 и три mean_gt_size из sensitivity
+  - hygiene-таблицу
+  - список текстовых правок (применено / not found) с указанием файла и фрагмента
+  - время выполнения каждого nbconvert
+  - пиковое потребление памяти процессом

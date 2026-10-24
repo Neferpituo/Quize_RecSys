@@ -1,0 +1,131 @@
+Ты - senior data analyst / ML engineer. Контекст двух предыдущих задач (EDA и правки EDA/evaluation) у тебя уе есть, ничего из готового не пересоздавай с нуля. Твоя задача - закрыть замечания к текущим версиям и сформировать три калибровочных baseline-сабмита для Kaggle. Время ограничено, цель - уложиться в 30-40 минут
+
+НЕ ВЫПОЛНЯТЬ на текущем этапе:
+- Обучение моделей MF / ALS / CBF / граф / гибрид (это следующий этап)
+- Загрузку файлом на Kaggle (сделаю вручную)
+- git push и git commit
+- Разработку веб-интерфейса (следующий этап)
+- Любые вычисления с повдеением пользователей в тестовых неделях 31-42; расписание 31-42 используется ТОЛЬКО как справочник: какие tv_show_id != 0 идут в тестовом окне
+
+1. Текущее состояние и целевая структура
+Уже существуют:
+ - src/data.py
+ - outputs/eda/eda.ipynb
+ - outputs/eda/figures/
+ - outputs/evaluation/evaluation.ipynb
+ - eval_metrics.json
+ - sensitivity.json
+ - data_par/raw/*.parquet (только чтение)
+ - data_par/submission.csv (шаблон, 1260 пользователей)
+Создаются или меняются:
+ - src/data.py - добавляются тесты и одна функция проверки
+ - src/baselines.py - новый, чистые функции
+ - src/check_submission.py - новый
+ - scripts/make_baseline_submissions.py - новый
+ - outputs/eda/eda.ipynb - правки текста и пара ячеек
+ - outputs/evaluation/evaluation.ipynb - правки
+ - outputs/evaluation/eval_matrix.json - новый
+ - outputs/submissions/col_global_pop.csv, cal_recent_pop.csv, cal_personal.csv - новые файлы
+ - logs/submission_log.csv - новый
+ - prompts/prompt_for_baseline_submission.txt - копия этого промпта
+
+Важно:
+ - Папка outputs/submissions - создается скриптом
+ - В outputs/eda ничего кроме eda.ipynb и figures не добавлять
+ - В outputs/eda и outputs/evaluation сабмиты не писать
+ - Кэш в data_par/processed разрешен (parquet)
+
+
+2. src/data.py - дополнить
+Определения существующих функций НЕ МЕНЯТЬ
+Добавить:
+ - функцию airings_exceeding_duration(airing_frame) - int: число строк, где watched_s > show_duration (чистая, без print, с docstring)
+ - тест: build_overlap_pairs против переборной реализации на случайных малых данных (seed 42, 3 канала, около 50 просмотров, около 40 программ, программы внутри канала идут подряд без пересечений, часть с tv_show_id = 0). Сравнить множества (view_idx, sched_idx, overlap_s) для пар с overlap_s > 0 и tv_show_id != 0. Отдельный кейс: просмотр, заканчивающийся ровно в момент начала программы, пару не дает
+ - тест: после merge_overlapping_views и build_airing_table arings_exceeding_duration ==  0 на случайных данных с намеренными дублями просмотров
+
+Тесты в pytest-стиле и skip-маркером, как уже сделано. Запустить, вывести passed/skipped
+
+
+3. eda.ipynb - правки (искать фрагменты по тексту, номера ячеек могли сдвинуться. Если фрагмент не найден - предупреждение в stdout и продолжить)
+3.1. Markdown в разделе D, начинающийся с "A view and a program are joined": заменить предложение "The threshold overlap_s / duration_shpw >= 0.8 is the rule described for the target labeling; ..." на "The threshold 0.8 is a candidate threshold chosen by myself; it is not a rule started in the competition or exam materials. It is compared with 0.3 and 0.5 in evauation.ipynb"
+3.2. Конфигурация и ячейка с таблицей прогов: ключ "overlap_over_show_duration_ge_0.8_ground_truth" переименовать в "overlap_over_show_duration_ge_0.8_candidate" (во всех местах использования); print "The ground-truth candidate threshold is ..." заменить на "The 0.8 value is a candidate threshold, not a rule from the competition"
+3.3. Ячейка sanity-check (с порогом 2 000 000): заменить на строгую проверку:
+(а) для пользователя 13866173795451203812 и tv_show_id 2400480 посчитать total_watched_s и total_show_duration_s ДО склейки (построить pair на подвыборке просмотров только этого пользователя из несклеенного views) и ПОСЛЕ склейки (из views_merged), вывести обе пары чисел
+(б) Вывести airings_exceeding_duration(airing_table) для всего airing_table; при значении >0 бросить AssertionError с числом нарушений, иначе print OK
+3.4. Conclusion раздела D и пункт в Notes and caveats про "control pair ... 2 276 062 ... 437 002 ... 2000000": переписать, используя только числа из ячейки 3.3 (до/после для одной и той де пары; число нарушений). Фразы про максимум 437 002 и порог 2 000 000 удалить
+3.5. Раздел F: добавить code-ячейку с таблицей топ-10 программ по числу уникальных пользователей в train_items: tv_show_id, n_users, самое частое название и категория (из расписаний 11-30, только tv_show_id != 0); отдельно вывести место и n_users для tv_show_id 2400480 и 2400467. Предложение "tv_show_id 2400480 is the absolute leader ... " в Conclusion заменить утверждением, которое следует из этой таблицы (id лидера, его n_users, n_users второго места), с числами из таблицы
+3.6. Markdown в разделе E: фразу "The public/private proportion is a Kaggle platform convention, not a document property of this competition" заменить на "The public/private split of the test users is not documented in the materials used for this project and cannot be derived from the data"
+3.7. Раздел H: в начало добавить markdown-заметку "Preliminary section. These baselines apply no candidate-pool restriction, rank personal history by qualified_airings and evaluate 1 214 test users. The reference validation protocol is outputs/evaluation/evaluation.ipynb; its numbers differ because of the candidate pool, the ranking key and the user group". В conclusion раздела H первым словом добавить Preliminary. В Notes and csveats добавить тот же факт одним пунктом
+3.8. Графики 03_top_categories.png и 03_top_genres.png: убрать ascii_text для подписей, использовать реальные подписи (DejaVu Sans поддерживает кириллицу). Если matplotlib выдаст предупреждения о missing glyph, вернуть ascii_text и вывести об этом предупреждение. Ось подписать "tv_show_category" / "tv_show_genre_1" без "(ASCII)"
+3.9. Финальный проход: сверить каждое число во всех Conclusion и Notes с выводами соответствующих ячеек (медиана и перцентили duration, число пар и порогов, доли метаданных, число пользователей по корзинам истории, baseline MAP). Вывести в stdout список "ok / исправлено / not found". Ничего не менять, кроме расхождений. 
+Раздел D: pair строится из views_merged, как и сейчас; логику остальных ячеек не менять. Исполнить: jupyter nbconvert --to notebook --execute --inplace --ExecutePreprocessor.timeout=1800 outputs/eda/eda.ipynb. Все графики пересоздаются.
+
+
+4. src/baselines.py и evaluation.ipynb
+4.1. Создать src/baselines.py (только pandas и numpy, чистые функции, docstring, без print, английский): ap_at_k, map_at_k, fill_with_fallback, build_fallback (перенос из evaluation.ipynb БЕЗ ИЗМЕНЕНИЯ ЛОГИКИ) и новые recommend_global_pop(hist_items, candidates, k=5), recommend_recent_pop(recent_items, candidates, k=5), recommend_personal(hist_items, candidates, fallback, users, k=5) -> dict user_id -> list из ровно k уникальных id. Правила: популярность = число уникальных user_id; personal = топ по total_watched_s среди id из candidates, затем добор через единый fallback (глобальный топ-5 по истории, отфильтрованный candidates). рекомендации никогда не пустые, ровно 5 уникальных
+4.2. evaluation.ipynb: заменить определения на импорт из src.baselines. Прочитать старые eval_metrics.json и sensitivity.json ДО перезаписи, после прогона убедиться, что значения совпадают с прежними до 1e-12 (иначе вывести расхождение и исправить, не подгоняя)
+4.3. Новый раздел Baseline matrix: для history-порога H из {0.3, 0.5, 0.8}, target-порога T из {0.3, 0.5, 0.8}, групп {all, test} и методов {global_pop, recent_pop, personal} посчитаь MAP@5. Группа all = все пользователи с непустым target; test = пользователи из data_par/submission.csv с непустым target. Пул кандидатов тот же (расписание 21-30), fallback пересчитывается для каждого H, recent = последние 4 недели окна истории (17-20). Кэшировать items по (недели, порог), освобождать память (del, gc.collect). Сохранить outputs/evaluation/eval_matrix.json: записи method, hist_threshold, target_threshold, group, MAP@5, n_users_eval (всего 54 записи). Вывести сводные pivot-таблицы
+4.4. eval_metrics.json (3 записи) и sensitivity.json (3 записи) по-прежнему создаются без изменения схемы. В Nptes and caveats добавить только факты: определения групп, размер групп n_users_eval, что history-порог и target-порог варьируется независимо
+
+
+5. Калибровочны сабмиты:
+Цель: првоерить на Kaggle, какой режим определения цели ближе к реальному. Это не выбор финальной стратегии
+5.1. scripts/make_baseline_submissions.py (использует src/data.py и src/baselines.py; все параметры в начале файла, SEED = 42, BASELINE_HIST_THRESHOLD=0.5, OUT_DIR=outputs/submissions):
+  - Загрузить views, merge_overlapping_views, iso_week; расписания 11-20 и 21-30, дедуп по (channel_id, start_time); build_overlap_pairs -> pair (как в evaluation.ipynb)ю Кэш pair и views_merged в data_par/processed/ по желанию
+  - hist_all = items_for_weeks_with_ratio(pair, views_merged, range(11, 31), H); hist_recent = недели 27-30 (последние 4 недели лога) с тем же H
+  - Тестовое расписание (export_arh_31-42-final.parquet) использовать ТОЛЬКО для пула: candidates_test = уникальные tv_show_id != 0. Вывести размер пула
+  - fallback_test = глобальный топ-5 по hist_all, отфильтрованный candidates_test
+  - три метода для 1260 пользователей шаблона в порядке шаблона: cal_gloabl_pop (топ-5 по hist_all), cal_recent_pop (топ-5 по hist_recent), cal_personal (топ-5 по total_watched_s из hist_all, отфильтрованный пулом, добор через fallback_test). 12 пользователей без истории получают fallbackЧ
+  - Создать папку outputs/submissions и записать outputs/submissions/cal_global_pop.csv, cal_recent_pop.csv, cal_personal.csv: заголовок user_id, tv_show_id user_id целым числом (НЕ float, без экспоненты, пример у тебя есть); ровно 5 различных tv_show_id через один пробел
+5.2. src/check_subnossion.py: функция и CLI (путь к файлу передается аргументом) для проверки файла по правилам: заголовое user_id, tv_show_id; 1260 строк; порядок и множество user_id как в шаблоне; в каждой строке ровно 5 различных целых tv_show_id; все id входят в candidates_test; нулей нет. Запустить до трех файлов, вывести результат
+5.3. logs/submission_log.csv: колонки version, file (путь вида outputs/submissions/...), description, hist_threshold, local_MAP_all_T03/T05/T08, local_MAP_test_T03/T05/T08, public_score (оставить пустым), created_at. Три строки.
+5.4. Вывести в stdout: для global_pop и recent_pop top-5 с названием и категорией (самое частое название id в расписании 31-42); число уникальных id в каждом файле; для personal долю пользователей, которым понадобился добор из fallback; pivot локальны MAP@5 из eval_matrix.json для H=0.5, target 0.3/0.5/0.8, группы all/test, три метода. Это локальные числа, с которыми я потом сравню public scores. Для каждого файла вывести также предлагаемое Description для загрузки на Kaggle (например "cal_global_pop H=0.5")
+5.5. Распечатать мне правило интерпретации (оно зафиксировано заранее): если public(personal) > public(recent_pop), основной целью выбора считается среднее MAP по T03 и T05; если наоборот, основной целью считается T08; если относительная разница меньше 10%, основной целью считается среднее MAP по T03, T05, T08. После этого ОСТАНОВИСЬ и попроси меня загрузить три файла на Kaggle и прислать public scores
+
+
+6. Язык и стиль
+- Весь код, комментарии, markdown, print, имена - на английском языке, без кириллицы (исключение: значения из данных в таблицах и подписи графиков, если они реальные названия)
+- Пояснения для меня на русском допускаются только в финальном отчете (п. 9)
+
+7. Жесткие запреты:
+- Не обучать модели, не подбирать гиперпараметры
+- Не менять определения существующих функций в src/data.py и логику перенесенных функций
+- Не использовать тестовые недели 31-42 ни для каких вычислений, кроме списка tv_show_id и названий/категорий программ из расписания
+- Не писать в data_par/raw
+- Не придумывать числа: каждое число в тексте берется из вывода ячейки или файла
+- Не падать, если фрагмент текста для замены не найден: предупредить и продолжить
+- Укладываться в 4 GB RAM: не держать одновременно несколько полных копий views и pair
+
+8. Acceptance criteria
+- Все тесты в src/data.py (старые и новые) passed
+- eda.ipynb исполняется без ошибок, у кодовых ячеек с выводом непустые outputs; в тексте нет "ground truth", "ground_truth", "rule described for the target labeling", "platform convention"; нет утверждения "absolute leader" без подкрепляющей таблицы
+- Для пары (13866173795451203812, 2400480) выведены значения до и после склейки; airings_exceeding_duration == 0
+- eval_metrics.json: ровно 3 записи, значения равны прежним до 1e-12; sensitivity.json: ровно 3 записи, значения равны прежним до 1e-12
+- eval_matrix.json: ровно 54 записи с указанными полями
+- outputs/submissions/*.csv: три файла проходят check_submission.py; в каждом 1260 строк и по 5 различных id
+- logs/submission_log.csv: содержит 3 строки, public_score пуст
+- в eda.ipynb, evaluation,ipynb и src/*.py нет кириллицы в коде и markdown
+- в outputs/eda только eda.ipynb и figures/
+- .gitignore не содержит outputs/ и outputs/submissions
+- Пик памяти меньше 4 GB
+
+9. Порядок выполнения и самопроверка
+1. Дополнить src/data.py (airings_exceeding_duration, два теста), запустить тесты
+2. Создать src/baselines.py
+3. Отредактировать eda.ipynb (п.3) и выполнить nbconvert --execute --inplace
+4. Отредактировать evaluation.ipynb (п. 4), выполнить nbconvert --execute --inplace, сверить eval_metrics.json и sensitivity.json со старыми значениями
+5. Создать src/check_submission.py и scripts/make_baseline_submissions.py, запустить скрипт, проверить три файла
+6. Создать logs/submissions_log.csv
+7. Сохранить текущий промпт в prompts под названием, которое указывал в самом начале
+8. В stdout вывести финальный отчет по-русски:
+  - список созданных и измененных файлов
+  - результат каждого acceptance-check (passed / failed + причина)
+  - список текстовых правок (применено / not found) с указанием файла и фрагмента
+  - результат sanity-проверки (до/после склейки, airings_exceeding_duration)
+  - pivot локальных MAP@5 (H=0.5) для трех baseline
+  - top-5 global_pop и recent_pop с названиями и категориями
+  - предлагаемые Description для загрузки на Kaggle
+  - время выполнения каждого nbconvert и скрипта
+  - пиковое потребление памяти процессом
+  - правило интепретации public scores
+9. Остановиться и ждать от меня public scores трех сабмитов

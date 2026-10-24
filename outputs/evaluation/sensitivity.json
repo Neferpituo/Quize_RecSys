@@ -1,0 +1,26 @@
+[
+  {
+    "threshold": 0.3,
+    "n_hist_items": 239880,
+    "n_tgt_items": 250520,
+    "mean_gt_size": 52.63025210084034,
+    "personal_MAP@5": 0.3808149509803922,
+    "n_users_eval": 4760
+  },
+  {
+    "threshold": 0.5,
+    "n_hist_items": 137234,
+    "n_tgt_items": 174566,
+    "mean_gt_size": 37.03139584217225,
+    "personal_MAP@5": 0.22363020317729695,
+    "n_users_eval": 4714
+  },
+  {
+    "threshold": 0.8,
+    "n_hist_items": 54294,
+    "n_tgt_items": 97271,
+    "mean_gt_size": 21.59658081705151,
+    "personal_MAP@5": 0.04385792875468719,
+    "n_users_eval": 4504
+  }
+]

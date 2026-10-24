@@ -1,0 +1,17 @@
+[
+  {
+    "method": "global_pop",
+    "MAP@5": 0.05437833037300178,
+    "n_users_eval": 4504
+  },
+  {
+    "method": "recent_pop",
+    "MAP@5": 0.08716825784487862,
+    "n_users_eval": 4504
+  },
+  {
+    "method": "personal",
+    "MAP@5": 0.04385792875468719,
+    "n_users_eval": 4504
+  }
+]
